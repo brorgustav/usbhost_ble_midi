@@ -1,0 +1,233 @@
+//The BLE-midi library by Adafruit only wants 3 bytes
+//which is unusual because BLE-midi devices usually wants a timestamp byte aswell
+// so i am guessing the library takes care of the timestamp for me
+
+#include "Arduino.h"
+#include "Adafruit_BLE.h"
+#include "Adafruit_BluefruitLE_SPI.h"
+#include "Adafruit_BLEMIDI.h"
+//#include "wiring_private.h" // pinPeripheral() function       // MIDI Library by Forty Seven Effects
+#include <usbh_midi.h>  // https://github.com/gdsports/USB_Host_Library_SAMD
+#include <usbhub.h>
+#include <SPI.h>
+#define FACTORYRESET_ENABLE         0
+#define MINIMUM_FIRMWARE_VERSION    "0.8.1"
+
+USBHost UsbH;
+USBH_MIDI MIDIUSBH(&UsbH);
+//#define USBH_MIDI_SYSEX_ENABLE
+#ifdef USBH_MIDI_SYSEX_ENABLE
+//SysEx:
+void handle_sysex( byte* sysexmsg, unsigned sizeofsysex) {
+  MIDIUSBH.SendSysEx(sysexmsg, sizeofsysex);
+}
+#endif
+#define SerialDebug if (1) SERIAL_PORT_MONITOR
+//Declare The SPI pins of your arduino
+#define BLUEFRUIT_SPI_CS               8
+#define BLUEFRUIT_SPI_IRQ              7
+#define BLUEFRUIT_SPI_RST              4
+
+#define BUFSIZE                        128   // Size of the read buffer for incoming data
+#define VERBOSE_MODE                   false  // If set to 'true' enables debug output
+
+Adafruit_BluefruitLE_SPI ble(BLUEFRUIT_SPI_CS, BLUEFRUIT_SPI_IRQ, BLUEFRUIT_SPI_RST);
+Adafruit_BLEMIDI midi(ble);
+bool isConnected = false;
+uint16_t sysexSize = 0;
+
+
+void error(const __FlashStringHelper*err) {
+  SerialDebug.println(err);
+  while (1);
+}
+
+// <Bluefruit library callbacks - they will be activated automatically for us
+void connected(void)
+{
+  isConnected = true;
+  SerialDebug.println(F(" We just connected to BLE device! :-) "));
+  delay(1000);
+}
+void disconnected(void)
+{
+  SerialDebug.println("We got disconnected from BLE device... :-( ");
+  
+  isConnected = false;
+}
+// >
+
+void sysex_end(uint8_t i)
+{
+  sysexSize += i;
+  //  DBG// SerialDebug.print(F("sysexSize="));
+  //   SerialDebug.println(sysexSize);
+  sysexSize = 0;
+}
+
+void setupBLE() {
+  if ( !ble.begin(VERBOSE_MODE) )
+  {
+    error(F("Couldn't find Bluefruit, make sure it's in CoMmanD mode & check wiring?"));
+  }
+  SerialDebug.println( F("OK!") );
+
+  if ( FACTORYRESET_ENABLE )
+  {
+    //    /* Perform a factory reset to make sure everything is in a known state */
+    SerialDebug.println(F("Performing a factory reset: "));
+    if ( ! ble.factoryReset() ) {
+      error(F("Couldn't factory reset"));
+    }
+  }
+  SerialDebug.println( F("OK!") );
+  //ble.sendCommandCheckOK(F("AT+uartflow=off"));
+  ble.echo(false);
+
+  SerialDebug.println("Requesting Bluefruit info:");
+  /* Print Bluefruit information */
+  ble.info();
+
+  /* Set BLE callbacks */
+  ble.setConnectCallback(connected);
+  ble.setDisconnectCallback(disconnected);
+
+  // Set MIDI RX callback
+  //  midi.setRxCallback(BleMidiRX); //Untested from BLE to USB
+
+  SerialDebug.println(F("Enable MIDI: "));
+  if ( ! midi.begin(true) )
+  {
+    error(F("Could not enable MIDI"));
+  }
+
+  ble.verbose(false);
+}
+
+void doDelay(uint32_t t1, uint32_t t2, uint32_t delayTime)
+{
+  uint32_t t3;
+
+  if ( t1 > t2 ) {
+    t3 = (0xFFFFFFFF - t1 + t2);
+  } else {
+    t3 = t2 - t1;
+  }
+
+  if ( t3 < delayTime ) {
+    delayMicroseconds(delayTime - t3);
+  }
+}
+void USBH_poll()
+{
+  uint8_t outBuf[3]; //Put the USB message into an array
+  uint8_t size;
+
+  do {
+    if ( (size = MIDIUSBH.RecvData(outBuf)) > 0 ) { // Check if its a message
+      //its a message so try to send it to BLE MIDI Output
+              SerialDebug.println("");
+              SerialDebug.println("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~");
+      SerialDebug.println("> MIDI message recieved from USBHOST: ");
+            SerialDebug.println(outBuf[0]); //0 is the first number of an array
+      SerialDebug.println(outBuf[1]);
+      SerialDebug.println(outBuf[2]);
+            SerialDebug.print("Size: ");
+            SerialDebug.println(size);
+
+                    SerialDebug.println("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~");
+                                        SerialDebug.println("");
+      
+          if (isConnected) //Are we connected to bluetooth?
+          {
+            //We are connected so forward the midi message
+      midi.send(outBuf[0], outBuf[1], outBuf[2]);
+      SerialDebug.println("******************************************");
+       SerialDebug.println("> Forward message to BLE device:");
+           SerialDebug.println(outBuf[0]); //0 is the first number of an array
+      SerialDebug.println(outBuf[1]);
+      SerialDebug.println(outBuf[2]);
+       SerialDebug.println("******************************************");
+      SerialDebug.println("");
+
+    }
+    
+    }
+  } while (size > 0);
+}
+
+uint8_t sendBLE(uint8_t command, uint8_t pitch, uint8_t velocity) //Unused function
+{
+  midi.send(command, pitch, velocity);
+  SerialDebug.println("");
+  SerialDebug.print("Redirected to BLE:");
+  SerialDebug.println(command);
+  SerialDebug.println(pitch);
+  SerialDebug.println(velocity);
+  SerialDebug.println("");
+}
+
+void BleMidiRX(uint16_t timestamp, uint8_t status, uint8_t byte1, uint8_t byte2) //Unused function
+{
+  uint8_t msg[4];
+  msg[0] = status;
+  msg[1] = byte1;
+  msg[2] = byte2;
+  MIDIUSBH.SendData(msg, 0);
+  SerialDebug.println("");
+  SerialDebug.println("BLE read");
+  SerialDebug.println("and redirects to USBhost");
+  SerialDebug.println(status);
+  SerialDebug.println(byte1);
+  SerialDebug.println(byte2);
+  SerialDebug.println("");
+}
+
+
+
+void setup() {
+  SerialDebug.begin(115200);
+  //By switching from different Arduino m0 boards i realized they behaved weird and different from each other
+  //some of them switch Serials when in USB-host mode and then sometimes wont provide power to USB device
+  //So i had to Serial1.begin / SerialUSB.begin and i always leave these in the setup function 
+  //Luckily this code doesnt use any serial except for debugging
+//  Serial.begin(115200);
+//  Serial1.begin(115200);
+//  SerialUSB.begin(115200);
+
+  pinMode(LED_BUILTIN, OUTPUT);
+  setupBLE();
+  if (UsbH.Init()) { 
+    SerialDebug.println(F("USB host failed to start"));
+    // digitalWrite(LED_BUILTIN, HIGH)
+    while (1) delay(1); // halt
+  }
+  delay( 200 );
+}
+
+
+
+void loop()
+{
+
+  UsbH.Task();
+  uint32_t t1 = (uint32_t)micros();
+  if (MIDIUSBH) {   // If MIDI USB reads something......
+    digitalWrite(LED_BUILTIN, HIGH); // Blink internal LED of arduino to troubleshoot...
+           // * <- If not paired with BLE device....
+         // <- Then cancel event and ignore converting to BLE
+    USBH_poll();
+
+  }
+  digitalWrite(LED_BUILTIN, LOW);
+  ble.update(100); //This is a non blocking delay to set BLE interval scanning
+  doDelay(t1, (uint32_t)micros(), 2000); //This is a delay to prevent your arduino from flooding with USB messages
+
+  //* Test if Arduino is working with internal LEDs 
+  // (i use this because sometimes my upload says it failed but it actually doesnt on some m0s)
+  //digitalWrite(LED_BUILTIN, HIGH);
+  //delay(4000);
+  //digitalWrite(LED_BUILTIN, LOW);
+  //delay(8000);
+
+}
